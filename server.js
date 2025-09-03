@@ -1,6 +1,8 @@
+// server.js
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import puppeteer from "puppeteer";
 
 dotenv.config();
 const app = express();
@@ -44,32 +46,31 @@ app.get("/search", async (req, res) => {
   res.json(result || { error: "所有 API key 都失敗" });
 });
 
-// Proxy 判斷是否允許 iframe
+// Puppeteer proxy 抓取頁面多媒體
 app.get("/proxy", async (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl) return res.status(400).send("缺少 url");
 
   try {
-    const response = await fetch(targetUrl);
-    const headers = response.headers;
+    const browser = await puppeteer.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.goto(targetUrl, { waitUntil: "networkidle2" });
 
-    // 檢查 X-Frame-Options 或 Content-Security-Policy
-    const xfo = headers.get("x-frame-options");
-    const csp = headers.get("content-security-policy");
-    const denyIframe = (xfo && xfo.toUpperCase() !== "ALLOWALL") || (csp && csp.includes("frame-ancestors"));
+    const imgs = await page.$$eval("img", imgs => imgs.map(i => i.src));
+    const videos = await page.$$eval("video", vids => vids.map(v => v.src));
+    const iframes = await page.$$eval("iframe", frames => frames.map(f => f.src));
 
-    if (denyIframe) {
-      return res.status(403).send("❌ 該網站不允許嵌入");
-    }
+    let html = "<html><body>";
+    imgs.forEach(src => html += `<img src="${src}" style="max-width:100%;"><br>`);
+    videos.forEach(src => html += `<video controls src="${src}" style="max-width:100%;"></video><br>`);
+    iframes.forEach(src => html += `<iframe src="${src}" allowfullscreen style="width:100%;height:400px;"></iframe><br>`);
+    html += "</body></html>";
 
-    const contentType = headers.get("content-type");
-    if (contentType) res.set("Content-Type", contentType);
-    const body = await response.text();
-    res.send(body);
-
+    await browser.close();
+    res.send(html);
   } catch (err) {
-    console.error("Proxy Error:", err);
-    res.status(500).send("代理失敗");
+    console.error(err);
+    res.status(500).send("抓取失敗");
   }
 });
 
