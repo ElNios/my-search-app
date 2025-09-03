@@ -3,7 +3,6 @@ import cors from "cors";
 import dotenv from "dotenv";
 
 dotenv.config();
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -19,14 +18,14 @@ let currentIndex = 0;
 // 搜尋 API
 app.get("/search", async (req, res) => {
   const query = req.query.q;
+  const type = req.query.type || "web";
   if (!query) return res.status(400).json({ error: "缺少關鍵字 q" });
 
   let result;
   for (let i = 0; i < API_CONFIGS.length; i++) {
     const { key, cx } = API_CONFIGS[currentIndex];
-
-    // 加上 safe=off，關閉 SafeSearch，更接近完整結果
-    const url = `https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(query)}&key=${key}&cx=${cx}&safe=off`;
+    let url = `https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(query)}&key=${key}&cx=${cx}&safe=off`;
+    if (type === "image") url += "&searchType=image";
 
     try {
       const response = await fetch(url);
@@ -45,24 +44,29 @@ app.get("/search", async (req, res) => {
   res.json(result || { error: "所有 API key 都失敗" });
 });
 
-// Proxy 端點
+// Proxy 判斷是否允許 iframe
 app.get("/proxy", async (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl) return res.status(400).send("缺少 url");
 
-  // 過濾不允許嵌入的網站
-  const blockedHosts = ["pornhub.com", "xnxx.com"]; // 可以自行擴充
   try {
-    const urlObj = new URL(targetUrl);
-    if (blockedHosts.some(host => urlObj.hostname.includes(host))) {
+    const response = await fetch(targetUrl);
+    const headers = response.headers;
+
+    // 檢查 X-Frame-Options 或 Content-Security-Policy
+    const xfo = headers.get("x-frame-options");
+    const csp = headers.get("content-security-policy");
+    const denyIframe = (xfo && xfo.toUpperCase() !== "ALLOWALL") || (csp && csp.includes("frame-ancestors"));
+
+    if (denyIframe) {
       return res.status(403).send("❌ 該網站不允許嵌入");
     }
 
-    const response = await fetch(targetUrl);
-    const contentType = response.headers.get("content-type");
+    const contentType = headers.get("content-type");
     if (contentType) res.set("Content-Type", contentType);
     const body = await response.text();
     res.send(body);
+
   } catch (err) {
     console.error("Proxy Error:", err);
     res.status(500).send("代理失敗");
