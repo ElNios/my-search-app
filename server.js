@@ -1,22 +1,21 @@
 import express from "express";
-import fetch from "node-fetch";
 import cors from "cors";
 import dotenv from "dotenv";
 
 dotenv.config();
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 
-// API Key + CX 配對 (從 .env 讀)
 const API_CONFIGS = [
   { key: process.env.API_KEY_1, cx: process.env.CX_1 },
   { key: process.env.API_KEY_2, cx: process.env.CX_2 }
 ];
+
 let currentIndex = 0;
 
-// 搜尋端點
 app.get("/search", async (req, res) => {
   const query = req.query.q;
   if (!query) return res.status(400).json({ error: "缺少關鍵字 q" });
@@ -39,10 +38,11 @@ app.get("/search", async (req, res) => {
       console.error(err);
     }
   }
+
   res.json(result || { error: "所有 API key 都失敗" });
 });
 
-// Proxy 端點（iframe 可用）
+// Proxy 端點，iframe 使用
 app.get("/proxy", async (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl) return res.status(400).send("缺少 url");
