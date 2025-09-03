@@ -3,12 +3,17 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import puppeteer from "puppeteer";
+<<<<<<< HEAD
+=======
+import fetch from "node-fetch";
+>>>>>>> 858cbbd (本地修改，準備同步遠端)
 
 dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
+app.use(express.static("public"));
 
 const API_CONFIGS = [
   { key: process.env.API_KEY_1, cx: process.env.CX_1 },
@@ -60,10 +65,17 @@ app.get("/proxy", async (req, res) => {
     const videos = await page.$$eval("video", vids => vids.map(v => v.src));
     const iframes = await page.$$eval("iframe", frames => frames.map(f => f.src));
 
+<<<<<<< HEAD
     let html = "<html><body>";
     imgs.forEach(src => html += `<img src="${src}" style="max-width:100%;"><br>`);
     videos.forEach(src => html += `<video controls src="${src}" style="max-width:100%;"></video><br>`);
     iframes.forEach(src => html += `<iframe src="${src}" allowfullscreen style="width:100%;height:400px;"></iframe><br>`);
+=======
+    let html = "<html><body style='padding:10px;font-family:Arial'>";
+    imgs.forEach(src => html += `<img src="${src}" style="max-width:100%;margin-bottom:5px;"><br>`);
+    videos.forEach(src => html += `<video controls src="${src}" style="max-width:100%;margin-bottom:5px;"></video><br>`);
+    iframes.forEach(src => html += `<iframe src="${src}" allowfullscreen style="width:100%;height:400px;margin-bottom:5px;"></iframe><br>`);
+>>>>>>> 858cbbd (本地修改，準備同步遠端)
     html += "</body></html>";
 
     await browser.close();

@@ -6,8 +6,27 @@
     "start": "node server.js"
   },
   "dependencies": {
+<<<<<<< HEAD
     "express": "^4.19.2",
+=======
+>>>>>>> 858cbbd (本地修改，準備同步遠端)
     "cors": "^2.8.5",
-    "dotenv": "^16.0.3"
-  }
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "node-fetch": "^3.3.2",
+    "puppeteer": "^24.18.0"
+  },
+  "main": "server.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://ElNios@github.com/ElNios/my-search-app.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/ElNios/my-search-app/issues"
+  },
+  "homepage": "https://github.com/ElNios/my-search-app#readme",
+  "description": ""
 }
