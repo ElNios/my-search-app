@@ -1,19 +1,19 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import fetch from "node-fetch";
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
 app.use(cors());
 
-// Google API 設定
 const API_CONFIGS = [
   { key: process.env.API_KEY_1, cx: process.env.CX_1 },
   { key: process.env.API_KEY_2, cx: process.env.CX_2 }
 ];
+
 let currentIndex = 0;
 
 // 搜尋 API
@@ -24,6 +24,8 @@ app.get("/search", async (req, res) => {
   let result;
   for (let i = 0; i < API_CONFIGS.length; i++) {
     const { key, cx } = API_CONFIGS[currentIndex];
+
+    // 加上 safe=off，關閉 SafeSearch，更接近完整結果
     const url = `https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(query)}&key=${key}&cx=${cx}&safe=off`;
 
     try {
@@ -48,28 +50,19 @@ app.get("/proxy", async (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl) return res.status(400).send("缺少 url");
 
-  const blockedHosts = ["pornhub.com", "xnxx.com"];
+  // 過濾不允許嵌入的網站
+  const blockedHosts = ["pornhub.com", "xnxx.com"]; // 可以自行擴充
   try {
     const urlObj = new URL(targetUrl);
-
-    // 黑名單直接新分頁
     if (blockedHosts.some(host => urlObj.hostname.includes(host))) {
-      return res.json({ openInNewTab: true, url: targetUrl });
+      return res.status(403).send("❌ 該網站不允許嵌入");
     }
 
     const response = await fetch(targetUrl);
-    const xFrame = response.headers.get("x-frame-options") || "";
-    const contentType = response.headers.get("content-type") || "";
-    const body = await response.text();
-
-    // 判斷禁止嵌入或含圖片/影片/iframe
-    if (xFrame.match(/DENY|SAMEORIGIN/i) || /<img|<video|<iframe/i.test(body)) {
-      return res.json({ openInNewTab: true, url: targetUrl });
-    }
-
+    const contentType = response.headers.get("content-type");
     if (contentType) res.set("Content-Type", contentType);
+    const body = await response.text();
     res.send(body);
-
   } catch (err) {
     console.error("Proxy Error:", err);
     res.status(500).send("代理失敗");
