@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import fetch from "node-fetch";
 
 dotenv.config();
 
@@ -8,14 +9,14 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 app.use(cors());
 
-// API key 配置
+// Google API 設定
 const API_CONFIGS = [
   { key: process.env.API_KEY_1, cx: process.env.CX_1 },
   { key: process.env.API_KEY_2, cx: process.env.CX_2 }
 ];
 let currentIndex = 0;
 
-// 搜尋端點
+// 搜尋 API
 app.get("/search", async (req, res) => {
   const query = req.query.q;
   if (!query) return res.status(400).json({ error: "缺少關鍵字 q" });
@@ -47,9 +48,11 @@ app.get("/proxy", async (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl) return res.status(400).send("缺少 url");
 
-  const blockedHosts = ["pornhub.com", "xnxx.com"]; // 可自行擴充
+  const blockedHosts = ["pornhub.com", "xnxx.com"];
   try {
     const urlObj = new URL(targetUrl);
+
+    // 黑名單直接新分頁
     if (blockedHosts.some(host => urlObj.hostname.includes(host))) {
       return res.json({ openInNewTab: true, url: targetUrl });
     }
@@ -59,7 +62,7 @@ app.get("/proxy", async (req, res) => {
     const contentType = response.headers.get("content-type") || "";
     const body = await response.text();
 
-    // 判斷是否禁止嵌入或包含圖片/影片/iframe
+    // 判斷禁止嵌入或含圖片/影片/iframe
     if (xFrame.match(/DENY|SAMEORIGIN/i) || /<img|<video|<iframe/i.test(body)) {
       return res.json({ openInNewTab: true, url: targetUrl });
     }
