@@ -14,7 +14,7 @@ app.use(cors());
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// API Keys 設定
+// API Keys
 const API_CONFIGS = [
   { key: process.env.API_KEY_1, cx: process.env.CX_1 },
   { key: process.env.API_KEY_2, cx: process.env.CX_2 }
@@ -22,7 +22,7 @@ const API_CONFIGS = [
 
 let currentIndex = 0;
 
-// 提供前端 index.html
+// 提供首頁
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "index.html"));
 });
@@ -53,16 +53,18 @@ app.get("/search", async (req, res) => {
   res.json(result || { error: "所有 API key 都失敗" });
 });
 
-// Proxy 端點，過濾不能嵌入網站
+// Proxy 端點
 app.get("/proxy", async (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl) return res.status(400).send("缺少 url");
 
-  const blockedHosts = ["pornhub.com", "xnxx.com"]; // 可自行擴充
+  // 禁止 iframe 的網站列表
+  const blockedHosts = ["pornhub.com", "xnxx.com"];
   try {
     const urlObj = new URL(targetUrl);
     if (blockedHosts.some(host => urlObj.hostname.includes(host))) {
-      return res.status(403).send("❌ 該網站不允許嵌入");
+      // 前端處理跳轉，後端仍回 200 HTML
+      return res.send(`<script>window.location.href="${targetUrl}"</script>`);
     }
 
     const response = await fetch(targetUrl);
