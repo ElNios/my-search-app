@@ -2,12 +2,11 @@
   "name": "my-search-app",
   "version": "1.0.0",
   "type": "module",
-  "scripts": {
-    "start": "node server.js"
-  },
+  "scripts": { "start": "node server.js" },
   "dependencies": {
     "express": "^4.19.2",
     "cors": "^2.8.5",
-    "dotenv": "^16.0.3"
+    "dotenv": "^16.0.3",
+    "node-html-parser": "^8.1.0"
   }
 }
