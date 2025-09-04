@@ -15,243 +15,222 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 app.use(cors());
 
-// 安全與限制設定
-const MAX_RESOURCE_BYTES = 15 * 1024 * 1024; // 15 MB 資源上限 (避免吃光記憶體)
-const FETCH_TIMEOUT_MS = 15_000; // fetch 超時 15s
-const BLOCKED_HOSTS = ["pornhub.com", "xnxx.com"]; // 可擴充
-
-// 讀取 API 設定 (從環境變數)
+// ---------- config ----------
 const API_CONFIGS = [
   { key: process.env.API_KEY_1, cx: process.env.CX_1 },
   { key: process.env.API_KEY_2, cx: process.env.CX_2 }
-].filter(c => c.key && c.cx);
+].filter(x => x.key && x.cx);
 
-let currentIndex = 0;
+const BLOCKED_HOSTS = (process.env.BLOCKED_HOSTS || "pornhub.com,xnxx.com").split(",").map(s=>s.trim()).filter(Boolean);
+const MAX_RESOURCE_BYTES = parseInt(process.env.MAX_RESOURCE_BYTES || String(15 * 1024 * 1024), 10); // 15MB default
+const FETCH_TIMEOUT_MS = parseInt(process.env.FETCH_TIMEOUT_MS || "15000", 10); // 15s
+// ----------------------------
 
-// helper: timeout fetch (Node 18+ fetch)
-async function fetchWithTimeout(url, opts = {}) {
+function timeoutFetch(url, opts = {}) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { ...opts, signal: controller.signal });
-    clearTimeout(id);
-    return res;
-  } catch (e) {
-    clearTimeout(id);
-    throw e;
-  }
+  return fetch(url, { ...opts, signal: controller.signal })
+    .finally(() => clearTimeout(id));
 }
 
-// 根目錄提供 index.html（如果你要靜態放別處也行）
+// serve front page if present
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "index.html"));
 });
 
-// 檢查是否可以嵌入 (HEAD 檢查 X-Frame-Options / CSP frame-ancestors)
+// ---------- can-embed: HEAD check ----------
 app.get("/can-embed", async (req, res) => {
   const target = req.query.url;
-  if (!target) return res.status(400).json({ error: "缺少 url" });
+  if (!target) return res.status(400).json({ ok:false, msg: "缺少 url" });
   try {
-    const urlObj = new URL(target);
-    // 簡單 host block
-    if (BLOCKED_HOSTS.some(h => urlObj.hostname.includes(h))) {
-      return res.json({ embed: false, reason: "blocked_host" });
-    }
-    // HEAD request 取得 header
-    let response;
+    const u = new URL(target);
+    if (BLOCKED_HOSTS.some(h => u.hostname.includes(h))) return res.json({ ok:true, embed:false, reason:"blocked_host" });
+
+    let head;
     try {
-      response = await fetchWithTimeout(target, { method: "HEAD" });
-    } catch (err) {
-      // 有些網站不接受 HEAD，改用 GET 但只取 headers (no body)
-      response = await fetchWithTimeout(target, { method: "GET" });
+      head = await timeoutFetch(target, { method: "HEAD" });
+    } catch (e) {
+      // HEAD 不通再用 GET 但不讀 body
+      head = await timeoutFetch(target, { method: "GET" });
     }
-    const xfo = response.headers.get("x-frame-options");
-    const csp = response.headers.get("content-security-policy") || response.headers.get("content-security-policy-report-only");
-    // 判斷
-    if (xfo) {
-      const v = xfo.toLowerCase();
-      if (v.includes("deny") || v.includes("sameorigin")) {
-        return res.json({ embed: false, reason: "x-frame-options" });
-      }
+    const xfo = head.headers.get("x-frame-options") || "";
+    const csp = head.headers.get("content-security-policy") || head.headers.get("content-security-policy-report-only") || "";
+
+    if (/deny|sameorigin/i.test(xfo)) return res.json({ ok:true, embed:false, reason:"x-frame-options" });
+    if (/frame-ancestors[^;]*/i.test(csp)) {
+      // 如果 csp 有 frame-ancestors 且不是允許所有，視為不允許
+      const fa = (csp.match(/frame-ancestors[^;]*/i)||[])[0] || "";
+      if (!/frame-ancestors\s+(\*|'self')/i.test(fa)) return res.json({ ok:true, embed:false, reason:"csp_frame_ancestors" });
     }
-    if (csp && /frame-ancestors/.test(csp)) {
-      // 若 csp 中有 frame-ancestors 限制，視為不允許
-      const frameAncestors = csp.match(/frame-ancestors[^;]*/i);
-      if (frameAncestors && !/frame-ancestors\s+(\*|'self')/i.test(frameAncestors[0])) {
-        return res.json({ embed: false, reason: "csp_frame_ancestors" });
-      }
-    }
-    return res.json({ embed: true });
+
+    return res.json({ ok:true, embed:true });
   } catch (err) {
     console.error("can-embed error:", err);
-    return res.json({ embed: false, reason: "error" });
+    return res.json({ ok:false, embed:false, reason:"error" });
   }
 });
 
-// SEARCH: 呼叫 Google Custom Search（自動輪詢 API_KEYS），關閉 safe search 以接近原始
+// ---------- search: call Google Custom Search, safer error handling ----------
 app.get("/search", async (req, res) => {
   const q = req.query.q;
-  if (!q) return res.status(400).json({ error: "缺少關鍵字 q" });
-  if (!API_CONFIGS.length) return res.status(500).json({ error: "未設定 API_KEYS/CX" });
+  if (!q) return res.status(400).json({ ok:false, msg:"缺少關鍵字 q" });
+  if (!API_CONFIGS.length) return res.status(500).json({ ok:false, msg:"尚未設定 API_KEY/CX" });
 
-  let result = null;
-  for (let i = 0; i < API_CONFIGS.length; i++) {
-    const { key, cx } = API_CONFIGS[currentIndex];
-    const url = `https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(q)}&key=${key}&cx=${cx}&safe=off&num=10`;
+  let out = null;
+  const tries = API_CONFIGS.length;
+  for (let i=0;i<tries;i++) {
+    const cfg = API_CONFIGS[currentIndex()];
+    const url = `https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(q)}&key=${cfg.key}&cx=${cfg.cx}&safe=off&num=10`;
     try {
-      const r = await fetchWithTimeout(url);
+      const r = await timeoutFetch(url);
       if (!r.ok) {
         if (r.status === 429) {
-          currentIndex = (currentIndex + 1) % API_CONFIGS.length;
+          // rotate and retry
+          rotateIndex();
           continue;
         } else {
-          const errBody = await r.text();
-          result = { error: `google error ${r.status}`, body: errBody };
+          const txt = await r.text().catch(()=>"");
+          out = { ok:false, msg:`google api error ${r.status}`, body: txt };
           break;
         }
       }
-      result = await r.json();
-      currentIndex = (currentIndex + 1) % API_CONFIGS.length;
+      const j = await r.json();
+      out = { ok:true, data: j };
+      rotateIndex();
       break;
     } catch (err) {
       console.error("search fetch error:", err);
-      currentIndex = (currentIndex + 1) % API_CONFIGS.length;
+      rotateIndex();
     }
   }
-  res.json(result || { error: "所有 API key 都失敗" });
+  if (!out) out = { ok:false, msg:"所有 API key 或網路皆失敗" };
+  res.json(out);
 });
 
-// resource: 代理靜態資源 (image/css/js/font/video)
-// - 會檢查大小限制、回傳正確 Content-Type
+// helper rotation
+let _idx = 0;
+function currentIndex(){ return _idx % API_CONFIGS.length; }
+function rotateIndex(){ _idx = (_idx + 1) % Math.max(1, API_CONFIGS.length); }
+
+// ---------- resource proxy: images/js/css/video (returns bytes) ----------
 app.get("/resource", async (req, res) => {
   const target = req.query.url;
   if (!target) return res.status(400).send("缺少 url");
   try {
-    const response = await fetchWithTimeout(target);
-    if (!response.ok) return res.status(502).send("resource fetch error");
+    const r = await timeoutFetch(target);
+    if (!r.ok) return res.status(502).send("resource fetch failed");
 
-    const contentType = response.headers.get("content-type") || "application/octet-stream";
-    const contentLength = response.headers.get("content-length");
-    if (contentLength && parseInt(contentLength) > MAX_RESOURCE_BYTES) {
-      return res.status(413).send("resource too large");
-    }
+    const ct = r.headers.get("content-type") || "application/octet-stream";
+    const cl = r.headers.get("content-length");
+    if (cl && parseInt(cl,10) > MAX_RESOURCE_BYTES) return res.status(413).send("resource too large");
 
-    // 讀取 buffer（注意：此方式會把資源放到記憶體，若要 stream 可改進）
-    const ab = await response.arrayBuffer();
+    const ab = await r.arrayBuffer();
     if (ab.byteLength > MAX_RESOURCE_BYTES) return res.status(413).send("resource too large");
 
-    res.set("Content-Type", contentType);
-    // 允許 browser 從你 domain 請求這些資源
+    res.set("Content-Type", ct);
+    res.set("Cache-Control", "public, max-age=300"); // 緩存 5 分
     res.set("Access-Control-Allow-Origin", "*");
-    res.send(Buffer.from(ab));
+    return res.send(Buffer.from(ab));
   } catch (err) {
     console.error("resource error:", err);
-    res.status(500).send("resource proxy error");
+    // 若是 image 可回傳 1x1 transparent png，避免 broken image
+    const png1x1 = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8Xw8AAn8B9k3g3wAAAABJRU5ErkJggg==",
+      "base64"
+    );
+    res.set("Content-Type","image/png");
+    return res.status(200).send(png1x1);
   }
 });
 
-// proxy: 針對 HTML 的代理 (會重寫資源 URL -> /resource)
+// ---------- proxy: HTML proxy with rewriting; error -> friendly HTML that links to original ----------
 app.get("/proxy", async (req, res) => {
   const target = req.query.url;
   if (!target) return res.status(400).send("缺少 url");
   try {
-    const urlObj = new URL(target);
-
-    // 區域 / 黑名單檢查
-    if (BLOCKED_HOSTS.some(h => urlObj.hostname.includes(h))) {
-      // 直接回 302 到外部網址（在iframe會變成在外部跳轉；但前端會先呼叫 /can-embed）
-      return res.redirect(target);
+    const u = new URL(target);
+    if (BLOCKED_HOSTS.some(h => u.hostname.includes(h))) {
+      // 直接給前端轉到外部（讓使用者在新分頁開啟）
+      return res.send(`<html><body><script>window.top.location.href=${JSON.stringify(target)};</script></body></html>`);
     }
 
-    // 先做 HEAD 檢查：若 X-Frame-Options/DENY 則告訴前端轉成新分頁（但前端會先 check /can-embed）
-    let headOk = true;
+    // HEAD-check X-Frame-Options/CSP
     try {
-      const head = await fetchWithTimeout(target, { method: "HEAD" });
-      const xfo = head.headers.get("x-frame-options");
-      const csp = head.headers.get("content-security-policy") || head.headers.get("content-security-policy-report-only");
-      if (xfo && /deny|sameorigin/i.test(xfo)) headOk = false;
-      if (csp && /frame-ancestors[^;]*/i.test(csp)) {
-        const fa = csp.match(/frame-ancestors[^;]*/i)[0];
-        if (!/frame-ancestors\s+(\*|'self')/i.test(fa)) headOk = false;
+      const h = await timeoutFetch(target, { method: "HEAD" });
+      const xfo = h.headers.get("x-frame-options") || "";
+      const csp = h.headers.get("content-security-policy") || h.headers.get("content-security-policy-report-only") || "";
+      if (/deny|sameorigin/i.test(xfo) || (/frame-ancestors[^;]*/i.test(csp) && !/frame-ancestors\s+(\*|'self')/i.test(csp.match(/frame-ancestors[^;]*/i)[0]||""))) {
+        // 不允許嵌入
+        return res.send(`<html><body><script>window.top.location.href=${JSON.stringify(target)};</script></body></html>`);
       }
     } catch (e) {
-      // 如果 HEAD 失敗，不影響，會嘗試 GET
+      // 無視 HEAD 錯誤，繼續嘗試 GET
     }
 
-    // GET HTML
-    const response = await fetchWithTimeout(target);
-    if (!response.ok) return res.status(502).send("proxy fetch failed");
+    const r = await timeoutFetch(target);
+    if (!r.ok) {
+      // friendly HTML with link to open original
+      return res.status(200).send(`<html><body style="font-family:Arial;padding:20px;">
+        <h3>無法在內嵌顯示此頁面</h3>
+        <p>後端抓取目標網站發生錯誤（狀態 ${r.status}）。</p>
+        <p><a href="${target}" target="_blank" rel="noopener">在新分頁打開原始網站</a></p>
+        </body></html>`);
+    }
 
-    const contentType = response.headers.get("content-type") || "";
+    const contentType = r.headers.get("content-type") || "";
     if (!contentType.includes("text/html")) {
-      // 非 HTML 的情況直接導到 /resource
+      // 非 HTML 直接 redirect 到 /resource（會由瀏覽器請求並取得 bytes）
       return res.redirect(`/resource?url=${encodeURIComponent(target)}`);
     }
 
-    // 讀取 body (text)
-    let body = await response.text();
+    // 讀 body
+    let body = await r.text();
 
-    // 解析並重寫資源 URL（img[src], script[src], link[href], a[href]）
+    // parse and rewrite resources to /resource or anchors to /proxy
     const root = parse(body, { script: true, style: true, pre: true });
 
-    // 加入 <base href="原始 URL"> 以便相對路徑正確
+    // add base tag so relative URLs resolve
     const head = root.querySelector("head");
-    if (head) {
-      const baseTag = `<base href="${urlObj.origin}">`;
-      head.insertAdjacentHTML("afterbegin", baseTag);
-    }
+    if (head) head.insertAdjacentHTML("afterbegin", `<base href="${u.origin}">`);
 
-    // 幫助函式：把相對 URL 轉絕對再重寫成 /resource?url=...
-    const rewriteAttr = (el, attrName) => {
-      const val = el.getAttribute(attrName);
-      if (!val) return;
+    const rewrite = (el, attr) => {
+      const v = el.getAttribute(attr);
+      if (!v) return;
       try {
-        const abs = new URL(val, urlObj.origin + urlObj.pathname).href;
-        // 若該資源為 HTML page (a link)，請導到 /proxy?url=...；否則導到 /resource?url=...
-        // we decide by extension
+        const abs = new URL(v, u.href).href;
         const lower = abs.split("?")[0].toLowerCase();
-        const isHtmlLike = lower.endsWith(".html") || lower.endsWith(".htm") || !path.extname(lower);
-        if (attrName === "href" && el.tagName === "A") {
-          el.setAttribute(attrName, `/proxy?url=${encodeURIComponent(abs)}`);
+        const ext = path.extname(lower);
+        const isHtmlLike = ext === "" || ext === ".html" || ext === ".htm";
+        if (el.tagName === "A" && attr === "href") {
+          el.setAttribute("href", `/proxy?url=${encodeURIComponent(abs)}`);
           el.setAttribute("target", "_self");
-        } else if (isHtmlLike && (el.tagName === "A")) {
-          el.setAttribute(attrName, `/proxy?url=${encodeURIComponent(abs)}`);
+        } else if (isHtmlLike && el.tagName === "A") {
+          el.setAttribute("href", `/proxy?url=${encodeURIComponent(abs)}`);
         } else {
-          el.setAttribute(attrName, `/resource?url=${encodeURIComponent(abs)}`);
+          el.setAttribute(attr, `/resource?url=${encodeURIComponent(abs)}`);
         }
       } catch (e) {
-        // 忽略無效 URL
+        // ignore
       }
     };
 
-    // 處理 images
-    root.querySelectorAll("img").forEach(img => rewriteAttr(img, "src"));
-    // 處理 scripts
-    root.querySelectorAll("script").forEach(s => {
-      if (s.getAttribute("src")) rewriteAttr(s, "src");
-    });
-    // 處理 link (css, favicon)
-    root.querySelectorAll("link").forEach(l => {
-      if (l.getAttribute("href")) rewriteAttr(l, "href");
-    });
-    // 處理 a 標籤
-    root.querySelectorAll("a").forEach(a => {
-      if (a.getAttribute("href")) rewriteAttr(a, "href");
-    });
-    // 處理 video source, source tags
-    root.querySelectorAll("source").forEach(s => {
-      if (s.getAttribute("src")) rewriteAttr(s, "src");
-      if (s.getAttribute("srcset")) s.setAttribute("srcset", s.getAttribute("srcset")); // leave for now
-    });
+    root.querySelectorAll("img").forEach(img => rewrite(img,"src"));
+    root.querySelectorAll("script").forEach(s => s.getAttribute("src") && rewrite(s,"src"));
+    root.querySelectorAll("link").forEach(l => l.getAttribute("href") && rewrite(l,"href"));
+    root.querySelectorAll("a").forEach(a => a.getAttribute("href") && rewrite(a,"href"));
+    root.querySelectorAll("source").forEach(s => s.getAttribute("src") && rewrite(s,"src"));
 
-    // 最後把修改後的 HTML 回傳
     const finalHtml = "<!doctype html>\n" + root.toString();
-    res.set("Content-Type", "text/html; charset=utf-8");
-    res.send(finalHtml);
+    res.set("Content-Type","text/html; charset=utf-8");
+    return res.send(finalHtml);
   } catch (err) {
     console.error("proxy error:", err);
-    res.status(500).send("代理失敗");
+    return res.status(500).send(`<html><body style="font-family:Arial;padding:20px;">
+      <h3>代理失敗</h3>
+      <p>後端處理代理時發生錯誤。</p>
+      <p><a href="${req.query.url || '#'}" target="_blank" rel="noopener">在新分頁打開原始網站</a></p>
+    </body></html>`);
   }
 });
 
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`✅ Server listening on ${PORT}`));
