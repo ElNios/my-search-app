@@ -1,20 +1,20 @@
-// server.js
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import puppeteer from "puppeteer";
-<<<<<<< HEAD
-=======
-import fetch from "node-fetch";
->>>>>>> 858cbbd (本地修改，準備同步遠端)
+import path from "path";
+import { fileURLToPath } from "url";
 
 dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.static("public"));
 
+// ESM __dirname
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// API Keys 設定
 const API_CONFIGS = [
   { key: process.env.API_KEY_1, cx: process.env.CX_1 },
   { key: process.env.API_KEY_2, cx: process.env.CX_2 }
@@ -22,18 +22,20 @@ const API_CONFIGS = [
 
 let currentIndex = 0;
 
+// 提供前端 index.html
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "index.html"));
+});
+
 // 搜尋 API
 app.get("/search", async (req, res) => {
   const query = req.query.q;
-  const type = req.query.type || "web";
   if (!query) return res.status(400).json({ error: "缺少關鍵字 q" });
 
   let result;
   for (let i = 0; i < API_CONFIGS.length; i++) {
     const { key, cx } = API_CONFIGS[currentIndex];
-    let url = `https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(query)}&key=${key}&cx=${cx}&safe=off`;
-    if (type === "image") url += "&searchType=image";
-
+    const url = `https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(query)}&key=${key}&cx=${cx}&safe=off`;
     try {
       const response = await fetch(url);
       if (!response.ok && response.status === 429) {
@@ -51,38 +53,26 @@ app.get("/search", async (req, res) => {
   res.json(result || { error: "所有 API key 都失敗" });
 });
 
-// Puppeteer proxy 抓取頁面多媒體
+// Proxy 端點，過濾不能嵌入網站
 app.get("/proxy", async (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl) return res.status(400).send("缺少 url");
 
+  const blockedHosts = ["pornhub.com", "xnxx.com"]; // 可自行擴充
   try {
-    const browser = await puppeteer.launch({ headless: true });
-    const page = await browser.newPage();
-    await page.goto(targetUrl, { waitUntil: "networkidle2" });
+    const urlObj = new URL(targetUrl);
+    if (blockedHosts.some(host => urlObj.hostname.includes(host))) {
+      return res.status(403).send("❌ 該網站不允許嵌入");
+    }
 
-    const imgs = await page.$$eval("img", imgs => imgs.map(i => i.src));
-    const videos = await page.$$eval("video", vids => vids.map(v => v.src));
-    const iframes = await page.$$eval("iframe", frames => frames.map(f => f.src));
-
-<<<<<<< HEAD
-    let html = "<html><body>";
-    imgs.forEach(src => html += `<img src="${src}" style="max-width:100%;"><br>`);
-    videos.forEach(src => html += `<video controls src="${src}" style="max-width:100%;"></video><br>`);
-    iframes.forEach(src => html += `<iframe src="${src}" allowfullscreen style="width:100%;height:400px;"></iframe><br>`);
-=======
-    let html = "<html><body style='padding:10px;font-family:Arial'>";
-    imgs.forEach(src => html += `<img src="${src}" style="max-width:100%;margin-bottom:5px;"><br>`);
-    videos.forEach(src => html += `<video controls src="${src}" style="max-width:100%;margin-bottom:5px;"></video><br>`);
-    iframes.forEach(src => html += `<iframe src="${src}" allowfullscreen style="width:100%;height:400px;margin-bottom:5px;"></iframe><br>`);
->>>>>>> 858cbbd (本地修改，準備同步遠端)
-    html += "</body></html>";
-
-    await browser.close();
-    res.send(html);
+    const response = await fetch(targetUrl);
+    const contentType = response.headers.get("content-type");
+    if (contentType) res.set("Content-Type", contentType);
+    const body = await response.text();
+    res.send(body);
   } catch (err) {
-    console.error(err);
-    res.status(500).send("抓取失敗");
+    console.error("Proxy Error:", err);
+    res.status(500).send("代理失敗");
   }
 });
 
